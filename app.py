@@ -144,7 +144,7 @@ with st.expander("1. API Configuration & Authentication", expanded=True):
         API_SECRET = st.secrets["api_credentials"]["secret"]
         st.info(f"Credentials loaded for domain: `{API_DOMAIN}`")
     except (KeyError, FileNotFoundError):
-        st.error("FATAL: API credentials are not configured. Please follow the setup instructions to add your credentials to secrets.toml.")
+        st.error("FATAL: API credentials are not configured. Please follow the setup instructions to add your credentials to the app's Settings.")
         st.stop() # Halt the app if secrets are not found
 
     col1, col2 = st.columns([1, 3])
@@ -182,19 +182,34 @@ else:
                     st.session_state.devices = devices
                 else:
                     st.session_state.devices = []
-
+    
     # Display status messages from the listing process
     if st.session_state.status_message:
         st.info(st.session_state.status_message)
         
     if st.session_state.devices:
         device_map = {d['name']: d['uuid'] for d in st.session_state.devices}
+        # Find the index of the currently selected UUID to preserve selection across reruns
+        device_names = list(device_map.keys())
+        current_selection_index = 0
+        if st.session_state.selected_uuid:
+            # Find the name corresponding to the stored UUID
+            for name, uuid in device_map.items():
+                if uuid == st.session_state.selected_uuid:
+                    current_selection_index = device_names.index(name)
+                    break
+        
         selected_name = st.selectbox(
             "Select a Raven from the list:",
-            options=device_map.keys(),
-            index=0
+            options=device_names,
+            index=current_selection_index
         )
-        st.session_state.selected_uuid = device_map[selected_name]
+        # Update the selected UUID if the selection changes
+        if st.session_state.selected_uuid != device_map[selected_name]:
+            st.session_state.selected_uuid = device_map[selected_name]
+            st.session_state.current_settings = None # Clear old settings on new device selection
+            st.rerun()
+        
         st.write(f"Selected UUID: `{st.session_state.selected_uuid}`")
 
 
@@ -222,15 +237,15 @@ else:
         # This is where we will build the payload for the update
         update_payload = {}
         
-        # Use tabs for a cleaner layout than nested accordions
+        # Use tabs for a cleaner layout
         tab_msg, tab_audio, tab_cam, tab_events, tab_obd, tab_wifi, tab_did, tab_sys, tab_eld = st.tabs([
             "Driver Messaging", "Audio", "Camera", "Events", "OBD", "WiFi Hotspot", "Driver ID", "System", "ELD"
         ])
 
         with tab_msg:
             st.subheader("Send a one-time message")
-            msg_text = st.text_input("Message (15 char max)", key="msg_text", max_chars=15)
-            msg_duration = st.number_input("Duration (seconds)", min_value=1, value=300, key="msg_duration")
+            msg_text = st.text_input("Message (15 char max)", placeholder="e.g., Call the office", max_chars=15)
+            msg_duration = st.number_input("Duration (seconds)", min_value=1, value=300)
             c1, c2, c3 = st.columns(3)
             if c1.button("Send Message", type="primary"):
                 success, error = send_message(API_DOMAIN, st.session_state.access_token, st.session_state.selected_uuid, msg_text, msg_duration)
@@ -243,20 +258,32 @@ else:
 
         with tab_audio:
             st.subheader("Audio Settings")
+            audio_data = s.get('audio', {})
             update_payload["audio"] = {
-                "audio_notifications_enabled": st.checkbox("General Audio Notifications", s.get('audio', {}).get('audio_notifications_enabled')),
-                "streaming_audio_enabled": st.checkbox("Enable Audio in Live Stream", s.get('audio', {}).get('streaming_audio_enabled')),
-                "message_notification_audio_enabled": st.checkbox("Message Notification Sound", s.get('audio', {}).get('message_notification_audio_enabled'))
+                "audio_notifications_enabled": st.checkbox("General Audio Notifications", audio_data.get('audio_notifications_enabled')),
+                "streaming_audio_enabled": st.checkbox("Enable Audio in Live Stream", audio_data.get('streaming_audio_enabled')),
+                "message_notification_audio_enabled": st.checkbox("Message Notification Sound", audio_data.get('message_notification_audio_enabled'))
             }
 
         with tab_cam:
             st.subheader("Camera Settings")
+            cam_data = s.get('camera', {})
+            road_cam_data = cam_data.get('road_camera', {})
+            cabin_cam_data = cam_data.get('cabin_camera', {})
+            
             c1, c2 = st.columns(2)
-            road_cam_enabled = c1.checkbox("Road Camera Enabled", s.get('camera', {}).get('road_camera', {}).get('camera_enabled'))
-            road_cam_audio = c1.checkbox("Road Camera Audio Recording", s.get('camera', {}).get('road_camera', {}).get('audio_recording'))
-            cabin_cam_enabled = c2.checkbox("Cabin Camera Enabled", s.get('camera', {}).get('cabin_camera', {}).get('camera_enabled'))
-            cabin_cam_audio = c2.checkbox("Cabin Camera Audio Recording", s.get('camera', {}).get('cabin_camera', {}).get('audio_recording'))
-            vid_profile = st.selectbox("Video Profile", ['standard', 'legacy', 'balanced', 'extended'], index=['standard', 'legacy', 'balanced', 'extended'].index(s.get('camera', {}).get('video_recording_profile', 'standard')))
+            with c1:
+                st.markdown("<b>Road Camera:</b>", unsafe_allow_html=True)
+                road_cam_enabled = st.checkbox("Enabled", road_cam_data.get('camera_enabled'), key='rc_en')
+                road_cam_audio = st.checkbox("Audio Recording", road_cam_data.get('audio_recording'), key='rc_aud')
+            with c2:
+                st.markdown("<b>Cabin Camera:</b>", unsafe_allow_html=True)
+                cabin_cam_enabled = st.checkbox("Enabled", cabin_cam_data.get('camera_enabled'), key='cc_en')
+                cabin_cam_audio = st.checkbox("Audio Recording", cabin_cam_data.get('audio_recording'), key='cc_aud')
+            
+            st.divider()
+            vid_profile_options = ['standard', 'legacy', 'balanced', 'extended']
+            vid_profile = st.selectbox("Video Profile", vid_profile_options, index=vid_profile_options.index(cam_data.get('video_recording_profile', 'standard')))
             
             update_payload["camera"] = {
                 "road_camera": {"camera_enabled": road_cam_enabled, "audio_recording": road_cam_audio},
@@ -265,40 +292,97 @@ else:
             }
             
         with tab_events:
-            # Recreate the nested accordion from the original using st.expander
             st.subheader("Event Settings")
-            
-            # This is a large dict, so we'll build it piece by piece
             events_payload = {}
             events_data = s.get('events', {})
 
-            with st.expander("G-Force Events"):
+            with st.expander("G-Force Events", expanded=True):
                 c1, c2 = st.columns(2)
                 events_payload['harsh_braking_event_enabled'] = c1.checkbox("Harsh Braking", events_data.get('harsh_braking_event_enabled'))
-                events_payload['harsh_braking_accel_threshold'] = c2.number_input("Braking Threshold", value=events_data.get('harsh_braking_accel_threshold', 0), key='hb_thresh')
+                events_payload['harsh_braking_accel_threshold'] = c2.number_input("Threshold (Braking)", value=events_data.get('harsh_braking_accel_threshold', 0), key='hb_thresh')
                 events_payload['aggressive_accel_event_enabled'] = c1.checkbox("Aggressive Accel", events_data.get('aggressive_accel_event_enabled'))
-                events_payload['aggressive_accel_threshold'] = c2.number_input("Accel Threshold", value=events_data.get('aggressive_accel_threshold', 0), key='aa_thresh')
-                # ... Add all other G-Force settings here in the same pattern ...
-            
-            with st.expander("Standard & Misc Events"):
-                events_payload['idling_event_enabled'] = st.checkbox("Idling Event", events_data.get('idling_event_enabled'))
-                # ... Add all other Standard settings here ...
+                events_payload['aggressive_accel_threshold'] = c2.number_input("Threshold (Accel)", value=events_data.get('aggressive_accel_threshold', 0), key='aa_thresh')
+                events_payload['harsh_cornering_event_enabled'] = c1.checkbox("Harsh Cornering", events_data.get('harsh_cornering_event_enabled'))
+                events_payload['harsh_cornering_accel_threshold'] = c2.number_input("Threshold (Cornering)", value=events_data.get('harsh_cornering_accel_threshold', 0), key='hc_thresh')
+                events_payload['possible_impact_event_enabled'] = c1.checkbox("Possible Impact", events_data.get('possible_impact_event_enabled'))
+                events_payload['possible_impact_accel_threshold'] = c2.number_input("Threshold (Impact)", value=events_data.get('possible_impact_accel_threshold', 0), key='pi_thresh')
+                events_payload['car_bumped_event_enabled'] = c1.checkbox("Car Bumped (when parked)", events_data.get('car_bumped_event_enabled'))
+                events_payload['car_bumped_accel_threshold'] = c2.number_input("Threshold (Bumped)", value=events_data.get('car_bumped_accel_threshold', 0), key='cb_thresh')
+
+            with st.expander("Standard & Miscellaneous Events"):
+                c1, c2, c3 = st.columns(3)
+                events_payload['idling_event_enabled'] = c1.checkbox("Idling", events_data.get('idling_event_enabled'))
+                events_payload['idling_event_grace_period'] = c2.number_input("Idling Grace Period (ms)", value=events_data.get('idling_event_grace_period', 0))
+                events_payload['idling_event_speed_floor'] = c3.number_input("Idling Speed Floor (km/h)", value=events_data.get('idling_event_speed_floor', 0))
+                
+                st.divider()
+                st.markdown("<b>Speeding</b>", unsafe_allow_html=True)
+                c1, c2, c3 = st.columns(3)
+                events_payload['speeding_event_enabled'] = c1.checkbox("Speeding Event Enabled", events_data.get('speeding_event_enabled'))
+                events_payload['speeding_event_threshold'] = c2.number_input("Speeding Threshold", value=events_data.get('speeding_event_threshold', 0))
+                events_payload['speeding_event_threshold_type'] = c3.selectbox("Speeding Type", ['CONSTANT', 'PERCENT'], index=['CONSTANT', 'PERCENT'].index(events_data.get('speeding_event_threshold_type', 'CONSTANT')), key='se_type')
+
+                st.markdown("<b>Speeding Visual Warning</b>", unsafe_allow_html=True)
+                c1, c2, c3 = st.columns(3)
+                c1.empty() # Placeholder for alignment
+                events_payload['speeding_visual_warning_threshold'] = c2.number_input("Visual Warning Threshold", value=events_data.get('speeding_visual_warning_threshold', 0))
+                events_payload['speeding_visual_warning_threshold_type'] = c3.selectbox("Visual Warning Type", ['CONSTANT', 'PERCENT'], index=['CONSTANT', 'PERCENT'].index(events_data.get('speeding_visual_warning_threshold_type', 'CONSTANT')), key='svw_type')
+                
+                st.divider()
+                st.markdown("<b>Miscellaneous</b>", unsafe_allow_html=True)
+                events_payload['auto_video_upload_enabled'] = st.checkbox("Auto Upload Event Video", events_data.get('auto_video_upload_enabled'))
+                events_payload['bad_install_event_enabled'] = st.checkbox("Bad Install Detection", events_data.get('bad_install_event_enabled'))
 
             with st.expander("Driver Monitoring (DMS)"):
-                st.write("Cellphone Detection")
-                events_payload['cellphone_detection_event_enabled'] = st.checkbox("Enabled", events_data.get('cellphone_detection_event_enabled'), key='dms_cell_en')
-                # ... Add all other DMS settings here ...
+                def dms_row(label, base_key, data):
+                    st.markdown(f"<b>{label}:</b>", unsafe_allow_html=True)
+                    c1, c2, c3, c4 = st.columns(4)
+                    payload = {}
+                    payload[f'{base_key}_event_enabled'] = c1.checkbox("Enabled", data.get(f'{base_key}_event_enabled'), key=f'{base_key}_en')
+                    payload[f'{base_key}_visual_alert_enabled'] = c2.checkbox("Visual Alert", data.get(f'{base_key}_visual_alert_enabled'), key=f'{base_key}_vis')
+                    payload[f'{base_key}_grace_period'] = c3.number_input("Grace Period (ms)", value=data.get(f'{base_key}_grace_period',0), key=f'{base_key}_grace')
+                    payload[f'{base_key}_speed_threshold'] = c4.number_input("Speed Threshold", value=data.get(f'{base_key}_speed_threshold',0), key=f'{base_key}_speed')
+                    st.divider()
+                    return payload
+
+                events_payload.update(dms_row("Cellphone Detection", "cellphone_detection", events_data))
+                events_payload.update(dms_row("Camera Obscured", "camera_obscured", events_data))
+                events_payload.update(dms_row("Distracted Detection", "distracted_detection", events_data))
+                events_payload.update(dms_row("Drinking Detection", "drinking_detection", events_data))
+                events_payload.update(dms_row("Eating Detection", "eating_detection", events_data))
+                events_payload.update(dms_row("Smoking Detection", "smoking_detection", events_data))
+                events_payload.update(dms_row("Fatigue (Tired) Detection", "tired_detection", events_data))
             
-            # NOTE: For brevity, not all 200+ settings are individually mapped.
-            # The pattern is established above. For a full migration, each checkbox/input
-            # would need to be created like the examples.
-            # A simpler, though less user-friendly way, is to show the JSON and allow editing.
-            st.warning("Note: Not all 200+ event settings have been individually mapped in this demo. The key ones are shown as an example.")
-            st.json(s.get('events', {}))
-            
-            # For the demo, we will pass the original event data back if unchanged
-            # A full implementation would build this dict from dozens of widgets
-            update_payload["events"] = events_data 
+            with st.expander("Assistance (ADAS)"):
+                st.markdown("<b>Tailgating Detection:</b>", unsafe_allow_html=True)
+                c1, c2, c3 = st.columns(3)
+                events_payload['tailgating_detection_event_enabled'] = c1.checkbox("Enabled", events_data.get('tailgating_detection_event_enabled'), key='tg_en')
+                events_payload['tailgating_detection_visual_alert_enabled'] = c2.checkbox("Visual Alert", events_data.get('tailgating_detection_visual_alert_enabled'), key='tg_vis')
+                st.markdown("---")
+                c1, c2, c3 = st.columns(3)
+                events_payload['tailgating_detection_speed_threshold'] = c1.number_input("Speed Threshold (km/h)", value=events_data.get('tailgating_detection_speed_threshold', 0))
+                events_payload['tailgating_detection_grace_period'] = c2.number_input("Grace Period (s)", value=events_data.get('tailgating_detection_grace_period', 0))
+                events_payload['tailgating_detection_follow_time'] = c3.number_input("Follow Time (s)", value=float(events_data.get('tailgating_detection_follow_time', 0.0)))
+                c1, c2, c3 = st.columns(3)
+                events_payload['tailgating_detection_critical_reaction_time'] = c1.number_input("Critical Reaction Time (s)", value=float(events_data.get('tailgating_detection_critical_reaction_time', 0.0)))
+                events_payload['tailgating_detection_alert_reaction_time'] = c2.number_input("Alert Reaction Time (s)", value=float(events_data.get('tailgating_detection_alert_reaction_time', 0.0)))
+                events_payload['tailgating_detection_safe_reaction_time'] = c3.number_input("Safe Reaction Time (s)", value=float(events_data.get('tailgating_detection_safe_reaction_time', 0.0)))
+
+                st.divider()
+                st.markdown("<b>Vanishing Point Calibration:</b>", unsafe_allow_html=True)
+                c1, c2 = st.columns(2)
+                events_payload['vanishing_point_calibration_enabled'] = c1.checkbox("Enabled", events_data.get('vanishing_point_calibration_enabled'), key='vp_en')
+                events_payload['vanishing_point_calibration_force'] = c2.checkbox("Force Calibration", events_data.get('vanishing_point_calibration_force'), key='vp_force')
+
+            with st.expander("Security"):
+                sec_data = events_data
+                c1,c2,c3 = st.columns(3)
+                events_payload['security_event_preview_count'] = c1.number_input("Preview Image Count", value=sec_data.get('security_event_preview_count', 0))
+                events_payload['security_event_preview_duration'] = c2.number_input("Preview Duration (s)", value=sec_data.get('security_event_preview_duration', 0))
+                events_payload['security_event_video_duration'] = c3.number_input("Video Duration (s)", value=sec_data.get('security_event_video_duration', 0))
+
+            # Assign the fully built dictionary to the main payload
+            update_payload["events"] = events_payload
 
         with tab_obd:
             st.subheader("OBD Settings")
@@ -307,9 +391,7 @@ else:
                 "canbus_enabled": st.checkbox("CANbus Enabled", obd_data.get('canbus_enabled')),
                 "low_battery_cutoff_millivolts": st.number_input("Low Battery Cutoff (mV)", value=obd_data.get('low_battery_cutoff_millivolts', 0))
             }
-        
-        # ... Other tabs (WiFi, Driver ID, etc.) would follow the same pattern ...
-        # For example:
+
         with tab_wifi:
             st.subheader("WiFi Hotspot")
             wifi_data = s.get('wifi_hotspot', {})
@@ -320,20 +402,42 @@ else:
                 "password": st.text_input("Password", wifi_data.get("password"), type="password")
             }
 
+        with tab_did:
+            st.subheader("Driver ID")
+            did_data = s.get('driver_id', {})
+            update_payload["driver_id"] = {
+                "barcode_driver_id_enabled": st.checkbox("Barcode ID Enabled", did_data.get('barcode_driver_id_enabled')),
+                "barcode_driver_id_request_period": st.selectbox("Request Period", ["PER_TRIP", "ALWAYS"], index=["PER_TRIP", "ALWAYS"].index(did_data.get('barcode_driver_id_request_period', 'PER_TRIP'))),
+                "barcode_driver_id_audio_delay": st.number_input("Audio Delay (s)", value=did_data.get('barcode_driver_id_audio_delay', 0))
+            }
+            
+        with tab_sys:
+            st.subheader("System Settings")
+            sys_data = s.get('system', {})
+            update_payload["system"] = {
+                "gesture_enabled": st.checkbox("Gesture Enabled", sys_data.get('gesture_enabled')),
+                "video_recording_after_parked_duration": st.number_input("Video Rec After Parked (s)", value=sys_data.get('video_recording_after_parked_duration', 0)),
+                "vehicle_speed_adjustment_percent": st.number_input("Speed Adjustment (%)", value=sys_data.get('vehicle_speed_adjustment_percent', 0))
+            }
+
+        with tab_eld:
+            st.subheader("ELD Settings")
+            eld_data = s.get('eld', {})
+            update_payload["eld"] = {
+                "eld_enabled": st.checkbox("ELD Enabled", eld_data.get('eld_enabled')),
+                "eld_visual_ud_alert_enabled": st.checkbox("Visual Unidentified Driving Alert", eld_data.get('eld_visual_ud_alert_enabled')),
+                "eld_visual_ud_alert_period": st.number_input("Alert Period (ms)", value=eld_data.get('eld_visual_ud_alert_period', 0))
+            }
 
         # --- UPDATE BUTTON ---
         st.header(" ") # Spacer
         if st.button("SAVE AND UPDATE ALL SETTINGS TO RAVEN", type="primary", use_container_width=True):
-            # Because not all settings are mapped, we display a warning.
-            # In a full app, you would remove this check and build the full payload.
-            st.warning("Sending update payload. Note: only settings on visible tabs are included in this demo.")
-            
             with st.spinner("Updating settings..."):
-                # In a real scenario, the update_payload would be fully constructed from all widgets
                 success, error = update_settings(API_DOMAIN, st.session_state.access_token, st.session_state.selected_uuid, update_payload)
                 if success:
                     st.success(success)
-                    # Also refresh the settings in the session state
+                    # Also refresh the settings in the session state to reflect changes
                     st.session_state.current_settings, _ = get_settings(API_DOMAIN, st.session_state.access_token, st.session_state.selected_uuid)
+                    st.rerun() # Rerun to show the refreshed settings in the UI
                 if error:
                     st.error(error)
